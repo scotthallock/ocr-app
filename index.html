@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Image Text Extraction</title>
+    <link rel="stylesheet" type="text/css" href="./mvp.css" />
+    <style>
+      :root {
+        --card-width: 500px;
+      }
+      hr {
+        margin-block-start: 20px;
+        margin-block-end: 20px;
+      }
+      form {
+        max-width: 500px;
+      }
+      .filename-cell {
+        width: 300;
+        max-width: 300px;
+      }
+      .status-cell {
+        width: 100px;
+        max-width: 100px;
+      }
+      .cut-text {
+        text-overflow: ellipsis;
+        overflow: hidden;
+      }
+      .alert-message {
+        color: #e00;
+      }
+      .image-container {
+        display: flex;
+        justify-content: center;
+        position: relative;
+        width: var(--card-width);
+        min-width: var(--card-width);
+        max-height: var(--card-width);
+        padding: 0;
+      }
+      .image-wrapper {
+        max-width: 100%;
+        max-height: 100%;
+      }
+      .image {
+        display: block;
+        max-width: 100%;
+        max-height: 100%;
+      }
+      .canvas-overlay {
+        /* center the canvas in the div so it
+            overlaps the image in the div*/
+        position: absolute;
+        margin-left: auto;
+        margin-right: auto;
+      }
+      .text-output {
+        background-color: #118bee15;
+        box-sizing: border-box;
+        padding: 10px;
+        width: var(--card-width);
+        max-height: 250px;
+        overflow: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section>
+        <form>
+          <h1>Image Text Extraction</h1>
+          <p>
+            This app uses
+            <a href="https://tesseract.projectnaptha.com/" target="_blank">Tesseract.js</a>, a port
+            of the popular Tesseract Optical Character Recognition (OCR) engine.
+          </p>
+          <p>Images can take several seconds or longer to process.</p>
+          <p>
+            👉 <a class="try-examples" href="javascript:void(0)">Click here to demo</a> with example
+            images on the server.
+          </p>
+          <label for="img">Upload your own images:</label>
+          <input class="img-input" type="file" name="img" accept="image/*" multiple required />
+          <div class="alert-message" hidden></div>
+        </form>
+      </section>
+      <hr />
+      <div class="status-table" hidden>
+        <section>
+          <table>
+            <thead>
+              <tr>
+                <th>File</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody class="status-table-body"></tbody>
+          </table>
+        </section>
+        <hr />
+      </div>
+      <div class="main-container"></div>
+    </main>
+
+    <script>
+      const startApp = () => {
+        /* DOM elements */
+        const $tryExamples = document.querySelector('.try-examples');
+        const $imgInput = document.querySelector('.img-input');
+        const $alertMessage = document.querySelector('.alert-message');
+        const $mainContainer = document.querySelector('.main-container');
+        const $statusTable = document.querySelector('.status-table');
+        const $statusTableBody = document.querySelector('.status-table-body');
+        let $statusCells;
+
+        /* Use 3 random images from the server to demo the app */
+        $tryExamples.addEventListener('click', async () => {
+          /* Reset things */
+          resetVariablesAndDOM();
+
+          const res = await fetch('/api/random');
+          const body = await res.json();
+          const jobId = body.jobId;
+          const imageUrls = body.images.map((e) => {
+            return `/examples/${e.filename}`; // 'examples' folder
+          });
+
+          /* Populate the status table */
+          populateStatusTable(body.images);
+
+          /* Load the images and canvas on the DOM */
+          const jobMetaData = await Promise.all(imageUrls.map(loadImageAndCanvas));
+
+          /* Make requests to the server to get the OCR data */
+          fetchOCRDataAndUpdateDOM(jobId, jobMetaData);
+        });
+
+        /* Upload your own images to the server to extract text from */
+        $imgInput.addEventListener('change', async () => {
+          /* There must be between 1-10 files to upload to the server */
+          const files = Array.from($imgInput.files);
+          if (files.length === 0) {
+            $alertMessage.innerText = 'Please add one or more files';
+            $alertMessage.hidden = false;
+            return;
+          }
+          if (files.length > 10) {
+            $alertMessage.innerText = 'Limit 10 files at a time';
+            $alertMessage.hidden = false;
+            return;
+          }
+
+          /* Reset things */
+          resetVariablesAndDOM();
+
+          /* Create a FormData from the selected image files */
+          const formData = new FormData();
+          files.forEach((file) => formData.append('userFiles', file, file.name));
+
+          /* Send the images to the server */
+          const res = await fetch('/api/assets', {
+            method: 'POST',
+            body: formData,
+          });
+          const body = await res.json();
+          const jobId = body.jobId;
+          const imageUrls = body.images.map((e) => {
+            return `/uploads/${e.filename}`; // 'uploads' folder
+          });
+
+          /* Populate the status table */
+          populateStatusTable(body.images);
+
+          /* Load the images and canvas on the DOM */
+          const jobMetaData = await Promise.all(imageUrls.map(loadImageAndCanvas));
+
+          /* Make requests to the server to get the OCR data */
+          fetchOCRDataAndUpdateDOM(jobId, jobMetaData);
+        });
+
+        /* Reset global variables DOM elements */
+        const resetVariablesAndDOM = () => {
+          jobMetaData = {};
+          $alertMessage.hidden = true;
+          $statusTable.hidden = true;
+          $statusTableBody.innerHTML = '';
+          $mainContainer.innerHTML = '';
+        };
+
+        /* Fill the status table with user uploads or examples */
+        const populateStatusTable = (images) => {
+          $statusTableBody.innerHTML = images.reduce((acc, e) => {
+            return (
+              acc +
+              `<tr>
+                    <td class="filename-cell"><div class="cut-text">${e.filename}</div></td>
+                    <td class="status-cell">⏳ processing</td>
+                    </tr>`
+            );
+          }, '');
+          $statusCells = document.querySelectorAll('.status-cell');
+          $statusTable.hidden = false; // un-hide the table
+        };
+
+        /* Load the images into the DOM, and add an overlaying <canvas> element */
+        const loadImageAndCanvas = (imageUrl) => {
+          return new Promise((resolve, reject) => {
+            $mainContainer.insertAdjacentHTML(
+              'beforeend',
+              `
+                    <section>
+                    <div class="image-container">
+                    <div class="image-wrapper"><img class="image"></div>
+                    <canvas class="canvas-overlay" hidden></canvas>
+                    </div>
+                    </section>
+                    <section class="text-output-container">
+                    <pre class="text-output"></pre>
+                    </section>
+                    <hr>
+                `
+            );
+            const $img = Array.from(document.querySelectorAll('.image')).pop();
+            const $canvasOverlay = Array.from(document.querySelectorAll('.canvas-overlay')).pop();
+            const $textOutput = Array.from(document.querySelectorAll('.text-output')).pop();
+
+            /* once the image loads, size the canvas to match */
+            $img.onload = () => {
+              /* calculate scale factor */
+              const scale_factor = $img.width / $img.naturalWidth;
+              $canvasOverlay.width = $img.width;
+              $canvasOverlay.height = $img.height;
+              $canvasOverlay.hidden = false;
+              /* We are resolving with two DOM elements and the scale_factor */
+              resolve({ $canvasOverlay, $textOutput, scale_factor });
+            };
+            $img.src = imageUrl;
+          });
+        };
+
+        /* Fetch the job data from the server until all images are processed and the output is render on the DOM */
+        const fetchOCRDataAndUpdateDOM = async (jobId, jobMetaData, alreadyRendered) => {
+          /* Fetch the current job. A job is an array; each element is an object
+               with data for an image that was processed by Tesseract OCR engine */
+          const res = await fetch(`/jobs/${jobId}`);
+          const job = await res.json();
+
+          /* alreadyRendered tracks which outputs have already been added to DOM,
+               so that we do not needlessly do it multiple times */
+          if (alreadyRendered === undefined) {
+            alreadyRendered = job.map((_) => false);
+          }
+
+          job.forEach((processedImage, i) => {
+            if (alreadyRendered[i] || processedImage.status !== 'done') {
+              return;
+            }
+
+            const $textOutput = jobMetaData[i].$textOutput; // the <pre> element
+            const $canvasOverlay = jobMetaData[i].$canvasOverlay; // the <canvas> element
+            const scale_factor = jobMetaData[i].scale_factor; // for scaling what will be drawn on the canvas
+
+            /* Add the processed image's output text to the DOM */
+            $textOutput.innerText = job[i].text.replace(/\n\s*\n/g, '\n');
+
+            /* Draw the boundary boxes on the canvas */
+            const ctx = $canvasOverlay.getContext('2d');
+            processedImage.ocr_data.forEach((e) => {
+              const left = e.left * scale_factor;
+              const top = e.top * scale_factor;
+              const width = e.width * scale_factor;
+              const height = e.height * scale_factor;
+              ctx.beginPath();
+              ctx.lineWidth = '0.5';
+              ctx.strokeStyle = 'red';
+              ctx.rect(left, top, width, height);
+              ctx.stroke();
+            });
+
+            /* We are done with this processedImage */
+            alreadyRendered[i] = true;
+            $statusCells[i].innerText = '✅ done!';
+          });
+
+          /* All images are processed */
+          if (alreadyRendered.every((e) => e === true)) {
+            console.log('JOB IS DONE');
+            return;
+          }
+
+          /* Repeat until all outputs are displayed on DOM */
+          setTimeout(() => {
+            fetchOCRDataAndUpdateDOM(jobId, jobMetaData, alreadyRendered);
+          }, 1000);
+        };
+      };
+      startApp();
+    </script>
+  </body>
+</html>
